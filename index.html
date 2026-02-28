@@ -116,7 +116,7 @@
     </script>
 </head>
 <body>
-    <video id="webcam" playsinline autoplay muted width="640" height="480"></video>
+    <video id="webcam" playsinline autoplay muted width="640" height="480" webkit-playsinline></video>
     <canvas id="webcam-overlay"></canvas>
     <canvas id="three-canvas"></canvas>
     <div id="status">Initializing...</div>
@@ -502,50 +502,56 @@
     async function initHandTracking() {
         const videoEl = document.getElementById('webcam');
 
-        // Request camera with flexible constraints for broad device support
-        const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
-        });
+        // Safari/iOS needs simpler constraints
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent) ||
+                         /iPad|iPhone|iPod/.test(navigator.userAgent);
+
+        const constraints = isSafari
+            ? { video: { facingMode: 'user' } }
+            : { video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         videoEl.srcObject = stream;
 
         // Wait for video to actually have data before proceeding
-        await new Promise((resolve) => {
+        await new Promise((resolve, reject) => {
             videoEl.onloadeddata = resolve;
-            videoEl.play();
+            videoEl.onerror = reject;
+            // Safari sometimes needs explicit play() call
+            const playPromise = videoEl.play();
+            if (playPromise) playPromise.catch(() => {});
         });
 
-        // Ensure video dimensions are set (some browsers need this)
-        videoEl.width = videoEl.videoWidth;
-        videoEl.height = videoEl.videoHeight;
+        // Ensure video dimensions are set from actual stream
+        videoEl.width = videoEl.videoWidth || 640;
+        videoEl.height = videoEl.videoHeight || 480;
         video = videoEl;
+        console.log('Video ready:', videoEl.videoWidth, 'x', videoEl.videoHeight);
 
-        // Try GPU first, fall back to CPU if GPU delegate fails
         const vision = await FilesetResolver.forVisionTasks(
             'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
         );
 
-        let delegate = 'GPU';
-        try {
-            handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                baseOptions: {
-                    modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-                    delegate: 'GPU'
-                },
-                runningMode: 'VIDEO', numHands: 2
-            });
-        } catch (e) {
-            console.warn('GPU delegate failed, falling back to CPU:', e);
-            delegate = 'CPU';
-            handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                baseOptions: {
-                    modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-                    delegate: 'CPU'
-                },
-                runningMode: 'VIDEO', numHands: 2
-            });
+        // Try GPU → CPU fallback chain
+        const delegates = ['GPU', 'CPU'];
+        for (const delegate of delegates) {
+            try {
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+                        delegate
+                    },
+                    runningMode: 'VIDEO',
+                    numHands: isSafari ? 1 : 2  // Safari: limit to 1 hand for performance
+                });
+                console.log('Hand tracking ready, delegate:', delegate);
+                handTrackingReady = true;
+                return;
+            } catch (e) {
+                console.warn(delegate + ' delegate failed:', e);
+            }
         }
-        console.log('Hand tracking ready, delegate:', delegate);
-        handTrackingReady = true;
+        throw new Error('Could not initialize hand tracking with any delegate');
     }
 
     function detectHands() {
@@ -907,15 +913,24 @@
     // =========================================================================
     async function init() {
         statusEl.textContent = 'INITIALIZING HOLOGRAPHIC INTERFACE...';
+
+        // Start particles immediately so they show even if tracking fails
+        animate();
+
         try {
             await initHandTracking();
             statusEl.textContent = 'SYSTEM ONLINE // SHOW YOUR HANDS';
             setTimeout(() => { statusEl.style.opacity='0'; }, 3000);
         } catch(err) {
             console.error('Hand tracking error:', err);
-            statusEl.textContent = 'ERROR: ' + err.message;
+            const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent) ||
+                             /iPad|iPhone|iPod/.test(navigator.userAgent);
+            if (isSafari) {
+                statusEl.textContent = 'SAFARI: CAMERA OR WASM ERROR // TRY CHROME OR EDGE';
+            } else {
+                statusEl.textContent = 'ERROR: ' + err.message;
+            }
         }
-        animate();
     }
 
     init();
