@@ -116,7 +116,7 @@
     </script>
 </head>
 <body>
-    <video id="webcam" playsinline></video>
+    <video id="webcam" playsinline autoplay muted width="640" height="480"></video>
     <canvas id="webcam-overlay"></canvas>
     <canvas id="three-canvas"></canvas>
     <div id="status">Initializing...</div>
@@ -144,10 +144,10 @@
     // =========================================================================
     // A: Constants
     // =========================================================================
-    const N = 4000; // more particles = crisper shapes
-    const SPREAD = 20;
+    const N = 3000;
+    const SPREAD = 28;
     const DAMPING = 0.92;
-    const RETURN_FORCE = 0.012; // stronger spring = tighter shapes
+    const RETURN_FORCE = 0.018; // strong spring = particles snap tightly to shapes
     const MAX_VELOCITY = 2.5;
     const HAND_SMOOTH = 0.25;
     const CONFIRM_FRAMES = 4;
@@ -180,148 +180,175 @@
     ];
 
     // =========================================================================
-    // B: Mathematical Shape Generators
-    //    Each returns a Float32Array(N*3) of positions scaled to ~radius 20
+    // B: Mathematical Shape Generators — grid-sampled for crisp surfaces
+    //    Uses uniform (u,v) grid instead of random sampling
     // =========================================================================
+
+    // Helper: compute grid dimensions for N points on a 2D surface
+    function gridDims(n) {
+        const cols = Math.ceil(Math.sqrt(n * 2)); // wider than tall
+        const rows = Math.ceil(n / cols);
+        return { cols, rows };
+    }
+
     function generateSphere() {
         const out = new Float32Array(N * 3);
+        const { cols, rows } = gridDims(N);
         for (let i = 0; i < N; i++) {
             const i3 = i*3;
-            const theta = Math.random() * Math.PI * 2;
-            const phi = Math.acos(2*Math.random()-1);
-            const r = SPREAD * Math.cbrt(Math.random());
-            out[i3]   = r * Math.sin(phi) * Math.cos(theta);
-            out[i3+1] = r * Math.sin(phi) * Math.sin(theta);
-            out[i3+2] = r * Math.cos(phi);
+            const row = Math.floor(i / cols);
+            const col = i % cols;
+            const u = (col / cols) * Math.PI * 2;
+            const v = (row / rows) * Math.PI;
+            const r = 18;
+            out[i3]   = r * Math.sin(v) * Math.cos(u);
+            out[i3+1] = r * Math.cos(v);
+            out[i3+2] = r * Math.sin(v) * Math.sin(u);
         }
         return out;
     }
 
     function generateMobius() {
         const out = new Float32Array(N * 3);
-        const R = 16;
+        const { cols, rows } = gridDims(N);
+        const R = 18;
         for (let i = 0; i < N; i++) {
             const i3 = i*3;
-            const u = (i / N) * Math.PI * 2;
-            const v = (Math.random() - 0.5) * 8; // width of the strip
-            // Mobius strip parametric equations
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const u = (col / cols) * Math.PI * 2;
+            const v = ((row / rows) - 0.5) * 6; // strip width = 6
             const halfU = u / 2;
             out[i3]   = (R + v * Math.cos(halfU)) * Math.cos(u);
-            out[i3+1] = (R + v * Math.cos(halfU)) * Math.sin(u);
-            out[i3+2] = v * Math.sin(halfU);
+            out[i3+1] = v * Math.sin(halfU);
+            out[i3+2] = (R + v * Math.cos(halfU)) * Math.sin(u);
         }
         return out;
     }
 
     function generateWormhole() {
-        // Catenoid shape (minimal surface) = wormhole throat
         const out = new Float32Array(N * 3);
-        const scale = 5;
+        const { cols, rows } = gridDims(N);
+        const a = 4; // throat radius
         for (let i = 0; i < N; i++) {
             const i3 = i*3;
-            const u = (i / N) * Math.PI * 2; // around the throat
-            const v = (Math.random() - 0.5) * 5; // along the axis (-2.5 to 2.5)
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const u = (col / cols) * Math.PI * 2;
+            const v = ((row / rows) - 0.5) * 6; // -3 to 3
             const coshV = Math.cosh(v);
-            out[i3]   = scale * coshV * Math.cos(u);
-            out[i3+1] = scale * v * 3; // stretch vertically
-            out[i3+2] = scale * coshV * Math.sin(u);
+            out[i3]   = a * coshV * Math.cos(u);
+            out[i3+1] = v * 5; // stretch height
+            out[i3+2] = a * coshV * Math.sin(u);
         }
         return out;
     }
 
     function generateLorenz() {
-        // Lorenz attractor: iterate the ODE, sample points along trajectory
         const out = new Float32Array(N * 3);
         const sigma = 10, rho = 28, beta = 8/3;
         let x = 0.1, y = 0, z = 0;
-        const dt = 0.005;
-        const scale = 0.7;
-        // Run a warmup to get onto the attractor
-        for (let i = 0; i < 1000; i++) {
-            const dx = sigma*(y-x)*dt;
-            const dy = (x*(rho-z)-y)*dt;
-            const dz = (x*y-beta*z)*dt;
-            x+=dx; y+=dy; z+=dz;
+        const dt = 0.004;
+        const scale = 0.8;
+        // Warmup
+        for (let i = 0; i < 2000; i++) {
+            x += sigma*(y-x)*dt; y += (x*(rho-z)-y)*dt; z += (x*y-beta*z)*dt;
         }
         for (let i = 0; i < N; i++) {
             const i3 = i*3;
-            // Multiple steps per sample for better coverage
-            for (let s = 0; s < 5; s++) {
+            for (let s = 0; s < 8; s++) {
                 const dx = sigma*(y-x)*dt;
                 const dy = (x*(rho-z)-y)*dt;
                 const dz = (x*y-beta*z)*dt;
                 x+=dx; y+=dy; z+=dz;
             }
             out[i3]   = x * scale;
-            out[i3+1] = (z - 25) * scale; // center vertically
+            out[i3+1] = (z - 25) * scale;
             out[i3+2] = y * scale;
         }
         return out;
     }
 
     function generateTorusKnot() {
-        // (p,q) torus knot with p=2, q=3 (trefoil)
+        // Trefoil torus knot: tube around a (2,3) knot curve
         const out = new Float32Array(N * 3);
-        const R = 14, r = 5;
+        const R = 15, tubeR = 2.5;
         const p = 2, q = 3;
+        const { cols, rows } = gridDims(N);
         for (let i = 0; i < N; i++) {
             const i3 = i*3;
-            const t = (i / N) * Math.PI * 2 * p;
-            const phi = (i / N) * Math.PI * 2 * q;
-            // Add slight random offset for volume
-            const jitter = (Math.random()-0.5) * 2;
-            const cr = r + jitter;
-            const cx = (R + cr * Math.cos(phi)) * Math.cos(t);
-            const cy = (R + cr * Math.cos(phi)) * Math.sin(t);
-            const cz = cr * Math.sin(phi);
-            out[i3] = cx;
-            out[i3+1] = cz; // swap y/z for better viewing angle
-            out[i3+2] = cy;
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const t = (col / cols) * Math.PI * 2;
+            const phi = (row / rows) * Math.PI * 2;
+
+            // Knot centerline
+            const r = R + tubeR * Math.cos(q * t);
+            const cx = r * Math.cos(p * t);
+            const cy = r * Math.sin(p * t);
+            const cz = tubeR * Math.sin(q * t);
+
+            // Offset along tube cross-section (approximate normal)
+            const nx = Math.cos(p * t) * Math.cos(phi) * 1.5;
+            const ny = Math.sin(p * t) * Math.cos(phi) * 1.5;
+            const nz = Math.sin(phi) * 1.5;
+
+            out[i3]   = cx + nx;
+            out[i3+1] = cz + nz;
+            out[i3+2] = cy + ny;
         }
         return out;
     }
 
     function generateDNA() {
-        // Double helix
         const out = new Float32Array(N * 3);
-        const radius = 10;
-        const height = 40;
-        const turns = 3;
+        const radius = 12;
+        const height = 50;
+        const turns = 4;
+        // Allocate: 45% strand1, 45% strand2, 10% rungs
+        const strand1End = Math.floor(N * 0.45);
+        const strand2End = Math.floor(N * 0.9);
+
         for (let i = 0; i < N; i++) {
             const i3 = i*3;
-            const t = (i / N);
-            const angle = t * Math.PI * 2 * turns;
-            const y = (t - 0.5) * height;
-
-            if (i % 3 === 0) {
-                // Strand 1
+            if (i < strand1End) {
+                // Strand 1 — evenly spaced
+                const t = i / strand1End;
+                const angle = t * Math.PI * 2 * turns;
                 out[i3]   = radius * Math.cos(angle);
-                out[i3+1] = y;
+                out[i3+1] = (t - 0.5) * height;
                 out[i3+2] = radius * Math.sin(angle);
-            } else if (i % 3 === 1) {
-                // Strand 2 (offset by pi)
-                out[i3]   = radius * Math.cos(angle + Math.PI);
-                out[i3+1] = y;
-                out[i3+2] = radius * Math.sin(angle + Math.PI);
+            } else if (i < strand2End) {
+                // Strand 2 — offset by pi
+                const t = (i - strand1End) / (strand2End - strand1End);
+                const angle = t * Math.PI * 2 * turns + Math.PI;
+                out[i3]   = radius * Math.cos(angle);
+                out[i3+1] = (t - 0.5) * height;
+                out[i3+2] = radius * Math.sin(angle);
             } else {
-                // Cross-links (rungs between the two strands)
-                const lerp = Math.random();
-                out[i3]   = radius * Math.cos(angle) * (1-lerp) + radius * Math.cos(angle+Math.PI) * lerp;
-                out[i3+1] = y;
-                out[i3+2] = radius * Math.sin(angle) * (1-lerp) + radius * Math.sin(angle+Math.PI) * lerp;
+                // Rungs connecting the two strands
+                const t = (i - strand2End) / (N - strand2End);
+                const angle = t * Math.PI * 2 * turns;
+                const lerp = ((i - strand2End) % 5) / 4; // 5 points per rung
+                const a1 = angle, a2 = angle + Math.PI;
+                out[i3]   = radius * Math.cos(a1) * (1-lerp) + radius * Math.cos(a2) * lerp;
+                out[i3+1] = (t - 0.5) * height;
+                out[i3+2] = radius * Math.sin(a1) * (1-lerp) + radius * Math.sin(a2) * lerp;
             }
         }
         return out;
     }
 
     function generateKlein() {
-        // Klein bottle immersion in 3D
         const out = new Float32Array(N * 3);
-        const scale = 3;
+        const scale = 3.5;
+        const { cols, rows } = gridDims(N);
         for (let i = 0; i < N; i++) {
             const i3 = i*3;
-            const u = (i / N) * Math.PI * 2;
-            const v = Math.random() * Math.PI * 2;
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const u = (col / cols) * Math.PI * 2;
+            const v = (row / rows) * Math.PI * 2;
             const cosU = Math.cos(u), sinU = Math.sin(u);
             const cosV = Math.cos(v), sinV = Math.sin(v);
 
@@ -337,7 +364,7 @@
 
             out[i3]   = x * scale;
             out[i3+1] = y * scale;
-            out[i3+2] = (z + 4) * scale; // center it
+            out[i3+2] = (z + 4) * scale;
         }
         return out;
     }
@@ -474,30 +501,67 @@
 
     async function initHandTracking() {
         const videoEl = document.getElementById('webcam');
+
+        // Request camera with flexible constraints for broad device support
         const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: 640, height: 480, facingMode: 'user' }
+            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
         });
         videoEl.srcObject = stream;
-        await videoEl.play();
+
+        // Wait for video to actually have data before proceeding
+        await new Promise((resolve) => {
+            videoEl.onloadeddata = resolve;
+            videoEl.play();
+        });
+
+        // Ensure video dimensions are set (some browsers need this)
+        videoEl.width = videoEl.videoWidth;
+        videoEl.height = videoEl.videoHeight;
         video = videoEl;
 
+        // Try GPU first, fall back to CPU if GPU delegate fails
         const vision = await FilesetResolver.forVisionTasks(
             'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
         );
-        handLandmarker = await HandLandmarker.createFromOptions(vision, {
-            baseOptions: {
-                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-                delegate: 'GPU'
-            },
-            runningMode: 'VIDEO', numHands: 2
-        });
+
+        let delegate = 'GPU';
+        try {
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+                    delegate: 'GPU'
+                },
+                runningMode: 'VIDEO', numHands: 2
+            });
+        } catch (e) {
+            console.warn('GPU delegate failed, falling back to CPU:', e);
+            delegate = 'CPU';
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+                    delegate: 'CPU'
+                },
+                runningMode: 'VIDEO', numHands: 2
+            });
+        }
+        console.log('Hand tracking ready, delegate:', delegate);
         handTrackingReady = true;
     }
 
     function detectHands() {
-        if (!handTrackingReady || !video || video.currentTime === lastVideoTime) return [];
-        lastVideoTime = video.currentTime;
-        return handLandmarker.detectForVideo(video, performance.now()).landmarks || [];
+        if (!handTrackingReady || !video) return [];
+        // Check video is actually playing and has data
+        if (video.readyState < 2) return [];
+        // Skip if same frame (but use >= to avoid stuck state on some browsers)
+        const t = video.currentTime;
+        if (t !== 0 && t === lastVideoTime) return [];
+        lastVideoTime = t;
+        try {
+            return handLandmarker.detectForVideo(video, performance.now()).landmarks || [];
+        } catch (e) {
+            console.warn('Detection error:', e);
+            return [];
+        }
     }
 
     // =========================================================================
@@ -594,18 +658,20 @@
     // H: Shape Morphing System
     // =========================================================================
     let currentShape = 'sphere';
-    let shapeTransition = 0; // 0 = fully at current shape
+    let latchedShape = 'sphere'; // persists even after hand is removed
 
     function updateShapeMorphing() {
-        // Determine target shape from dominant gesture
+        // Only change shape when a NEW gesture is detected — latch it
         const activeHand = handStates.find(h => h.gesture !== G.NONE);
-        const targetShape = activeHand ? GESTURE_INFO[activeHand.gesture].shape : 'sphere';
-
-        if (targetShape !== currentShape) {
-            // Set new target
-            targetPositions.set(shapes[targetShape]);
-            currentShape = targetShape;
+        if (activeHand) {
+            const newShape = GESTURE_INFO[activeHand.gesture].shape;
+            if (newShape !== latchedShape) {
+                latchedShape = newShape;
+                targetPositions.set(shapes[newShape]);
+                currentShape = newShape;
+            }
         }
+        // Shape stays even when hand is removed — no revert to sphere
 
         // Smoothly morph basePositions toward targetPositions
         for (let i = 0; i < N*3; i++) {
@@ -667,7 +733,14 @@
         geometry.attributes.position.needsUpdate = true;
     }
 
+    // Only update colors every 3rd frame to save CPU
+    let colorFrame = 0;
+    let targetR = 0.3, targetG = 0.8, targetB = 0.9; // cached target color
+
     function updateColors() {
+        colorFrame++;
+        if (colorFrame % 3 !== 0) return;
+
         const time = performance.now()*0.001;
         const activeHand = handStates.find(h => h.gesture !== G.NONE);
         let baseHue = 0.53 + Math.sin(time*0.3)*0.02;
@@ -678,27 +751,34 @@
             sat=0.7; light=0.6;
         }
 
+        // Compute one target color and tint all particles toward it
+        tmpColor.setHSL(baseHue, sat, light);
+        targetR=tmpColor.r; targetG=tmpColor.g; targetB=tmpColor.b;
+
         for (let i=0; i<N; i++) {
             const i3=i*3;
-            const hue = (baseHue + (i/N)*0.08) % 1.0;
-            tmpColor.setHSL(hue, sat, light);
-            colors[i3]   += (tmpColor.r-colors[i3])*0.04;
-            colors[i3+1] += (tmpColor.g-colors[i3+1])*0.04;
-            colors[i3+2] += (tmpColor.b-colors[i3+2])*0.04;
+            colors[i3]   += (targetR-colors[i3])*0.06;
+            colors[i3+1] += (targetG-colors[i3+1])*0.06;
+            colors[i3+2] += (targetB-colors[i3+2])*0.06;
         }
         geometry.attributes.color.needsUpdate = true;
     }
 
+    // Only update sizes every 3rd frame
     function updateSizes() {
+        if (colorFrame % 3 !== 1) return;
+
         const anyActive = handStates.some(h => h.gesture !== G.NONE);
-        for (let i=0; i<N; i++) {
-            let target = baseSizes[i];
-            if (anyActive) {
+        if (!anyActive) {
+            // Quick path: reset all to base
+            for (let i=0; i<N; i++) sizes[i] += (baseSizes[i]-sizes[i])*0.1;
+        } else {
+            for (let i=0; i<N; i++) {
                 const i3=i*3;
-                const speed = Math.sqrt(velocities[i3]**2+velocities[i3+1]**2+velocities[i3+2]**2);
-                target = baseSizes[i] + speed*1.2;
+                const vx=velocities[i3], vy=velocities[i3+1], vz=velocities[i3+2];
+                const speed = vx*vx+vy*vy+vz*vz; // skip sqrt, use squared
+                sizes[i] += (baseSizes[i]+speed*0.8 - sizes[i])*0.1;
             }
-            sizes[i] += (target-sizes[i])*0.1;
         }
         geometry.attributes.size.needsUpdate = true;
     }
@@ -782,9 +862,8 @@
             }
         }
 
-        // Shape label
-        const activeHand = handStates.find(h => h.gesture !== G.NONE);
-        const shapeLabel = activeHand ? GESTURE_INFO[activeHand.gesture].label : '';
+        // Shape label — always shows current latched shape
+        const shapeLabel = latchedShape === 'sphere' ? '' : GESTURE_INFO[Object.keys(GESTURE_INFO).find(k => GESTURE_INFO[k].shape === latchedShape)].label;
         if (shapeLabel !== lastShapeLabel) {
             lastShapeLabel = shapeLabel;
             shapeLabelEl.textContent = shapeLabel;
