@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STARK INDUSTRIES // Holographic Interface</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #020408;
+            overflow: hidden;
+            font-family: 'Consolas', 'SF Mono', monospace;
+            color: #4af0ff;
+        }
+        #three-canvas {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 0;
+        }
+        #webcam { display: none; }
+        #webcam-overlay {
+            position: fixed;
+            bottom: 16px; right: 16px;
+            width: 240px; height: 180px;
+            border-radius: 4px;
+            border: 1px solid rgba(74,240,255,0.25);
+            z-index: 10;
+            background: rgba(2,4,8,0.8);
+            box-shadow: 0 0 20px rgba(74,240,255,0.08), inset 0 0 30px rgba(74,240,255,0.03);
+        }
+        #status {
+            position: fixed;
+            top: 16px; left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            font-size: 11px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            padding: 8px 24px;
+            background: rgba(2,4,8,0.7);
+            border: 1px solid rgba(74,240,255,0.15);
+            border-radius: 2px;
+            transition: opacity 0.5s;
+        }
+        #shape-label {
+            position: fixed;
+            top: 52px; left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            font-size: 13px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            padding: 6px 20px;
+            background: rgba(2,4,8,0.5);
+            border: 1px solid rgba(74,240,255,0.2);
+            border-radius: 2px;
+            transition: opacity 0.3s;
+            opacity: 0;
+        }
+        #gesture-labels {
+            position: fixed;
+            bottom: 206px; right: 16px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            align-items: flex-end;
+        }
+        .gesture-tag {
+            font-size: 10px;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            padding: 4px 10px;
+            background: rgba(2,4,8,0.7);
+            border: 1px solid rgba(74,240,255,0.2);
+            border-radius: 2px;
+            white-space: nowrap;
+            color: #4af0ff;
+        }
+        #hud-top-left {
+            position: fixed;
+            top: 16px; left: 16px;
+            z-index: 10;
+            font-size: 10px;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            opacity: 0.4;
+            line-height: 1.8;
+        }
+        #help-panel {
+            position: fixed;
+            bottom: 16px; left: 16px;
+            z-index: 10;
+            font-size: 10px;
+            letter-spacing: 1px;
+            padding: 10px 14px;
+            background: rgba(2,4,8,0.6);
+            border: 1px solid rgba(74,240,255,0.1);
+            border-radius: 2px;
+            line-height: 1.8;
+            text-transform: uppercase;
+            opacity: 0.5;
+        }
+        #help-panel b { color: #4af0ff; opacity: 1; }
+        #help-panel .key { opacity: 0.35; }
+    </style>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <video id="webcam" playsinline></video>
+    <canvas id="webcam-overlay"></canvas>
+    <canvas id="three-canvas"></canvas>
+    <div id="status">Initializing...</div>
+    <div id="shape-label"></div>
+    <div id="gesture-labels"></div>
+    <div id="hud-top-left">
+        Stark Industries<br>
+        Holographic Interface v3.2<br>
+        <span id="hud-fps"></span>
+    </div>
+    <div id="help-panel">
+        <b>Gesture // Formation</b><br>
+        <span class="key">Pinch</span> Mobius Strip<br>
+        <span class="key">Palm</span> Wormhole<br>
+        <span class="key">Fist</span> Lorenz Attractor<br>
+        <span class="key">Peace</span> Torus Knot<br>
+        <span class="key">Thumb</span> DNA Helix<br>
+        <span class="key">Point</span> Klein Bottle
+    </div>
+
+    <script type="module">
+    import * as THREE from 'three';
+    import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
+    // =========================================================================
+    // A: Constants
+    // =========================================================================
+    const N = 4000; // more particles = crisper shapes
+    const SPREAD = 20;
+    const DAMPING = 0.92;
+    const RETURN_FORCE = 0.012; // stronger spring = tighter shapes
+    const MAX_VELOCITY = 2.5;
+    const HAND_SMOOTH = 0.25;
+    const CONFIRM_FRAMES = 4;
+    const INFLUENCE_RSQ = 3000;
+    const MORPH_SPEED = 0.06; // faster morphing so shapes form quickly
+
+    const CYAN = new THREE.Color(0x4af0ff);
+    const BLUE = new THREE.Color(0x1a6bff);
+    const WHITE = new THREE.Color(0xddeeff);
+
+    const G = {
+        NONE:'none', PINCH:'pinch', OPEN_PALM:'open_palm',
+        FIST:'fist', PEACE:'peace', THUMBS_UP:'thumbs_up', POINT:'point'
+    };
+
+    const GESTURE_INFO = {
+        [G.NONE]:      { label: 'Sphere',           shape: 'sphere',   hue: 0.53 },
+        [G.PINCH]:     { label: 'Mobius Strip',      shape: 'mobius',   hue: 0.52 },
+        [G.OPEN_PALM]: { label: 'Wormhole',          shape: 'wormhole', hue: 0.56 },
+        [G.FIST]:      { label: 'Lorenz Attractor',  shape: 'lorenz',   hue: 0.58 },
+        [G.PEACE]:     { label: 'Torus Knot',        shape: 'tknot',    hue: 0.50 },
+        [G.THUMBS_UP]: { label: 'DNA Helix',         shape: 'dna',      hue: 0.48 },
+        [G.POINT]:     { label: 'Klein Bottle',      shape: 'klein',    hue: 0.54 }
+    };
+
+    const HAND_CONNECTIONS = [
+        [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+        [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+        [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]
+    ];
+
+    // =========================================================================
+    // B: Mathematical Shape Generators
+    //    Each returns a Float32Array(N*3) of positions scaled to ~radius 20
+    // =========================================================================
+    function generateSphere() {
+        const out = new Float32Array(N * 3);
+        for (let i = 0; i < N; i++) {
+            const i3 = i*3;
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2*Math.random()-1);
+            const r = SPREAD * Math.cbrt(Math.random());
+            out[i3]   = r * Math.sin(phi) * Math.cos(theta);
+            out[i3+1] = r * Math.sin(phi) * Math.sin(theta);
+            out[i3+2] = r * Math.cos(phi);
+        }
+        return out;
+    }
+
+    function generateMobius() {
+        const out = new Float32Array(N * 3);
+        const R = 16;
+        for (let i = 0; i < N; i++) {
+            const i3 = i*3;
+            const u = (i / N) * Math.PI * 2;
+            const v = (Math.random() - 0.5) * 8; // width of the strip
+            // Mobius strip parametric equations
+            const halfU = u / 2;
+            out[i3]   = (R + v * Math.cos(halfU)) * Math.cos(u);
+            out[i3+1] = (R + v * Math.cos(halfU)) * Math.sin(u);
+            out[i3+2] = v * Math.sin(halfU);
+        }
+        return out;
+    }
+
+    function generateWormhole() {
+        // Catenoid shape (minimal surface) = wormhole throat
+        const out = new Float32Array(N * 3);
+        const scale = 5;
+        for (let i = 0; i < N; i++) {
+            const i3 = i*3;
+            const u = (i / N) * Math.PI * 2; // around the throat
+            const v = (Math.random() - 0.5) * 5; // along the axis (-2.5 to 2.5)
+            const coshV = Math.cosh(v);
+            out[i3]   = scale * coshV * Math.cos(u);
+            out[i3+1] = scale * v * 3; // stretch vertically
+            out[i3+2] = scale * coshV * Math.sin(u);
+        }
+        return out;
+    }
+
+    function generateLorenz() {
+        // Lorenz attractor: iterate the ODE, sample points along trajectory
+        const out = new Float32Array(N * 3);
+        const sigma = 10, rho = 28, beta = 8/3;
+        let x = 0.1, y = 0, z = 0;
+        const dt = 0.005;
+        const scale = 0.7;
+        // Run a warmup to get onto the attractor
+        for (let i = 0; i < 1000; i++) {
+            const dx = sigma*(y-x)*dt;
+            const dy = (x*(rho-z)-y)*dt;
+            const dz = (x*y-beta*z)*dt;
+            x+=dx; y+=dy; z+=dz;
+        }
+        for (let i = 0; i < N; i++) {
+            const i3 = i*3;
+            // Multiple steps per sample for better coverage
+            for (let s = 0; s < 5; s++) {
+                const dx = sigma*(y-x)*dt;
+                const dy = (x*(rho-z)-y)*dt;
+                const dz = (x*y-beta*z)*dt;
+                x+=dx; y+=dy; z+=dz;
+            }
+            out[i3]   = x * scale;
+            out[i3+1] = (z - 25) * scale; // center vertically
+            out[i3+2] = y * scale;
+        }
+        return out;
+    }
+
+    function generateTorusKnot() {
+        // (p,q) torus knot with p=2, q=3 (trefoil)
+        const out = new Float32Array(N * 3);
+        const R = 14, r = 5;
+        const p = 2, q = 3;
+        for (let i = 0; i < N; i++) {
+            const i3 = i*3;
+            const t = (i / N) * Math.PI * 2 * p;
+            const phi = (i / N) * Math.PI * 2 * q;
+            // Add slight random offset for volume
+            const jitter = (Math.random()-0.5) * 2;
+            const cr = r + jitter;
+            const cx = (R + cr * Math.cos(phi)) * Math.cos(t);
+            const cy = (R + cr * Math.cos(phi)) * Math.sin(t);
+            const cz = cr * Math.sin(phi);
+            out[i3] = cx;
+            out[i3+1] = cz; // swap y/z for better viewing angle
+            out[i3+2] = cy;
+        }
+        return out;
+    }
+
+    function generateDNA() {
+        // Double helix
+        const out = new Float32Array(N * 3);
+        const radius = 10;
+        const height = 40;
+        const turns = 3;
+        for (let i = 0; i < N; i++) {
+            const i3 = i*3;
+            const t = (i / N);
+            const angle = t * Math.PI * 2 * turns;
+            const y = (t - 0.5) * height;
+
+            if (i % 3 === 0) {
+                // Strand 1
+                out[i3]   = radius * Math.cos(angle);
+                out[i3+1] = y;
+                out[i3+2] = radius * Math.sin(angle);
+            } else if (i % 3 === 1) {
+                // Strand 2 (offset by pi)
+                out[i3]   = radius * Math.cos(angle + Math.PI);
+                out[i3+1] = y;
+                out[i3+2] = radius * Math.sin(angle + Math.PI);
+            } else {
+                // Cross-links (rungs between the two strands)
+                const lerp = Math.random();
+                out[i3]   = radius * Math.cos(angle) * (1-lerp) + radius * Math.cos(angle+Math.PI) * lerp;
+                out[i3+1] = y;
+                out[i3+2] = radius * Math.sin(angle) * (1-lerp) + radius * Math.sin(angle+Math.PI) * lerp;
+            }
+        }
+        return out;
+    }
+
+    function generateKlein() {
+        // Klein bottle immersion in 3D
+        const out = new Float32Array(N * 3);
+        const scale = 3;
+        for (let i = 0; i < N; i++) {
+            const i3 = i*3;
+            const u = (i / N) * Math.PI * 2;
+            const v = Math.random() * Math.PI * 2;
+            const cosU = Math.cos(u), sinU = Math.sin(u);
+            const cosV = Math.cos(v), sinV = Math.sin(v);
+
+            let x, y, z;
+            if (u < Math.PI) {
+                x = 3*cosU*(1+sinU) + 2*(1-cosU/2)*cosU*cosV;
+                z = -8*sinU - 2*(1-cosU/2)*sinU*cosV;
+            } else {
+                x = 3*cosU*(1+sinU) + 2*(1-cosU/2)*Math.cos(v+Math.PI);
+                z = -8*sinU;
+            }
+            y = -2*(1-cosU/2)*sinV;
+
+            out[i3]   = x * scale;
+            out[i3+1] = y * scale;
+            out[i3+2] = (z + 4) * scale; // center it
+        }
+        return out;
+    }
+
+    // Pre-compute all shapes
+    const shapes = {
+        sphere:   generateSphere(),
+        mobius:   generateMobius(),
+        wormhole: generateWormhole(),
+        lorenz:   generateLorenz(),
+        tknot:    generateTorusKnot(),
+        dna:      generateDNA(),
+        klein:    generateKlein()
+    };
+
+    // =========================================================================
+    // C: Three.js Scene
+    // =========================================================================
+    const statusEl = document.getElementById('status');
+    const shapeLabelEl = document.getElementById('shape-label');
+    const gestureLabelsEl = document.getElementById('gesture-labels');
+    const hudFps = document.getElementById('hud-fps');
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x020408, 0.006);
+
+    const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 500);
+    camera.position.z = 50;
+
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('three-canvas'), antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setClearColor(0x020408, 1);
+
+    window.addEventListener('resize', () => {
+        camera.aspect = innerWidth/innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // Grid floor
+    const gridHelper = new THREE.GridHelper(200, 40, 0x0a3040, 0x061520);
+    gridHelper.position.y = -35;
+    gridHelper.material.transparent = true;
+    gridHelper.material.opacity = 0.3;
+    scene.add(gridHelper);
+
+    // Wireframe icosahedron (core)
+    const icoGeo = new THREE.IcosahedronGeometry(12, 1);
+    const icoMat = new THREE.MeshBasicMaterial({ color: 0x4af0ff, wireframe: true, transparent: true, opacity: 0.06 });
+    const icoMesh = new THREE.Mesh(icoGeo, icoMat);
+    scene.add(icoMesh);
+
+    // Orbital rings
+    const ringGeo = new THREE.TorusGeometry(20, 0.08, 8, 80);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x4af0ff, transparent: true, opacity: 0.1 });
+    const ring1 = new THREE.Mesh(ringGeo, ringMat);
+    ring1.rotation.x = Math.PI/2;
+    scene.add(ring1);
+    const ring2 = new THREE.Mesh(ringGeo, ringMat.clone());
+    ring2.rotation.x = Math.PI/3; ring2.rotation.z = Math.PI/4;
+    scene.add(ring2);
+
+    // =========================================================================
+    // D: Particle System
+    // =========================================================================
+    const positions = new Float32Array(N * 3);
+    const velocities = new Float32Array(N * 3);
+    const basePositions = new Float32Array(N * 3);
+    const targetPositions = new Float32Array(N * 3);
+    const colors = new Float32Array(N * 3);
+    const sizes = new Float32Array(N);
+    const baseSizes = new Float32Array(N);
+    const tmpColor = new THREE.Color();
+
+    // Initialize to sphere
+    positions.set(shapes.sphere);
+    basePositions.set(shapes.sphere);
+    targetPositions.set(shapes.sphere);
+
+    for (let i = 0; i < N; i++) {
+        const i3 = i*3;
+        const t = Math.random();
+        tmpColor.copy(CYAN).lerp(BLUE, t*0.5);
+        if (Math.random() < 0.08) tmpColor.lerp(WHITE, 0.6);
+        colors[i3]=tmpColor.r; colors[i3+1]=tmpColor.g; colors[i3+2]=tmpColor.b;
+        const s = Math.random()*1.8+0.4;
+        sizes[i]=s; baseSizes[i]=s;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+    geometry.attributes.position.usage = THREE.DynamicDrawUsage;
+    geometry.attributes.color.usage = THREE.DynamicDrawUsage;
+    geometry.attributes.size.usage = THREE.DynamicDrawUsage;
+
+    const vertexShader = `
+        attribute float size;
+        varying vec3 vColor;
+        void main() {
+            vColor = color;
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = size * (200.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    `;
+    const fragmentShader = `
+        varying vec3 vColor;
+        void main() {
+            float dist = length(gl_PointCoord - vec2(0.5));
+            if (dist > 0.5) discard;
+            float alpha = 1.0 - smoothstep(0.0, 0.5, dist);
+            float glow = exp(-dist * 4.0) * 0.5;
+            gl_FragColor = vec4(vColor * (alpha + glow), alpha * 0.9);
+        }
+    `;
+
+    const material = new THREE.ShaderMaterial({
+        vertexShader, fragmentShader,
+        vertexColors: true, transparent: true,
+        depthWrite: false, blending: THREE.AdditiveBlending
+    });
+    scene.add(new THREE.Points(geometry, material));
+
+    // =========================================================================
+    // E: MediaPipe
+    // =========================================================================
+    let handLandmarker = null;
+    let video = null;
+    let lastVideoTime = -1;
+    let handTrackingReady = false;
+
+    async function initHandTracking() {
+        const videoEl = document.getElementById('webcam');
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: 'user' }
+        });
+        videoEl.srcObject = stream;
+        await videoEl.play();
+        video = videoEl;
+
+        const vision = await FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+        );
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+                modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+                delegate: 'GPU'
+            },
+            runningMode: 'VIDEO', numHands: 2
+        });
+        handTrackingReady = true;
+    }
+
+    function detectHands() {
+        if (!handTrackingReady || !video || video.currentTime === lastVideoTime) return [];
+        lastVideoTime = video.currentTime;
+        return handLandmarker.detectForVideo(video, performance.now()).landmarks || [];
+    }
+
+    // =========================================================================
+    // F: Gesture Detection
+    // =========================================================================
+    function isFingerExtended(lm, tipIdx, pipIdx) {
+        const wrist=lm[0], tip=lm[tipIdx], pip=lm[pipIdx];
+        const td = Math.hypot(tip.x-wrist.x, tip.y-wrist.y, tip.z-wrist.z);
+        const pd = Math.hypot(pip.x-wrist.x, pip.y-wrist.y, pip.z-wrist.z);
+        return td > pd * 1.05;
+    }
+    function isThumbExtended(lm) {
+        const tip=lm[4], ip=lm[3], im=lm[5];
+        return Math.hypot(tip.x-im.x, tip.y-im.y) > Math.hypot(ip.x-im.x, ip.y-im.y) * 1.1;
+    }
+    function isThumbPointingUp(lm) {
+        const tip=lm[4], mcp=lm[2], wrist=lm[0];
+        return (mcp.y-tip.y) > 0.06 && (wrist.y-tip.y) > 0.08;
+    }
+    function getFingerStates(lm) {
+        return {
+            thumb: isThumbExtended(lm),
+            index: isFingerExtended(lm,8,6),
+            middle: isFingerExtended(lm,12,10),
+            ring: isFingerExtended(lm,16,14),
+            pinky: isFingerExtended(lm,20,18)
+        };
+    }
+    function classifyGesture(lm) {
+        const f = getFingerStates(lm);
+        const ext = [f.thumb,f.index,f.middle,f.ring,f.pinky].filter(Boolean).length;
+        const pDist = Math.hypot(lm[4].x-lm[8].x, lm[4].y-lm[8].y, lm[4].z-lm[8].z);
+
+        if (pDist < 0.06) return G.PINCH;
+        if (f.thumb && !f.index && !f.middle && !f.ring && !f.pinky && isThumbPointingUp(lm)) return G.THUMBS_UP;
+        if (f.index && !f.middle && !f.ring && !f.pinky) return G.POINT;
+        if (f.index && f.middle && !f.ring && !f.pinky) return G.PEACE;
+        if (ext >= 4) return G.OPEN_PALM;
+        if (ext <= 1) return G.FIST;
+        return G.NONE;
+    }
+
+    class GestureSmoother {
+        constructor() { this.current=G.NONE; this.pending=G.NONE; this.frames=0; }
+        update(raw) {
+            if (raw===this.pending) this.frames++;
+            else { this.pending=raw; this.frames=1; }
+            if (this.frames >= CONFIRM_FRAMES) this.current=this.pending;
+            return this.current;
+        }
+    }
+    const smoothers = [new GestureSmoother(), new GestureSmoother()];
+
+    // =========================================================================
+    // G: Hand-to-3D Mapping
+    // =========================================================================
+    const handStates = [
+        { pos: new THREE.Vector3(0,0,-1000), gesture: G.NONE, landmarks: null, fingerTip: new THREE.Vector3() },
+        { pos: new THREE.Vector3(0,0,-1000), gesture: G.NONE, landmarks: null, fingerTip: new THREE.Vector3() }
+    ];
+    const _uv = new THREE.Vector3();
+
+    function getPalmCenter(lm) {
+        let x=0,y=0,z=0;
+        for (const i of [0,5,9,13,17]) { x+=lm[i].x; y+=lm[i].y; z+=lm[i].z; }
+        return { x:x/5, y:y/5, z:z/5 };
+    }
+    function landmarkTo3D(pt) {
+        const nx = 1-pt.x;
+        _uv.set(nx*2-1, -(pt.y*2-1), 0.5).unproject(camera);
+        const dir = _uv.sub(camera.position).normalize();
+        const d = -camera.position.z/dir.z;
+        const wp = camera.position.clone().add(dir.multiplyScalar(d));
+        wp.z += pt.z*50;
+        return wp;
+    }
+    function updateHandStates(allLandmarks) {
+        for (let h=0; h<2; h++) {
+            const hs = handStates[h];
+            if (h < allLandmarks.length) {
+                const lm = allLandmarks[h];
+                hs.landmarks = lm;
+                hs.pos.lerp(landmarkTo3D(getPalmCenter(lm)), HAND_SMOOTH);
+                hs.gesture = smoothers[h].update(classifyGesture(lm));
+                hs.fingerTip.lerp(landmarkTo3D(lm[8]), HAND_SMOOTH);
+            } else {
+                hs.gesture = smoothers[h].update(G.NONE);
+                hs.landmarks = null;
+            }
+        }
+    }
+
+    // =========================================================================
+    // H: Shape Morphing System
+    // =========================================================================
+    let currentShape = 'sphere';
+    let shapeTransition = 0; // 0 = fully at current shape
+
+    function updateShapeMorphing() {
+        // Determine target shape from dominant gesture
+        const activeHand = handStates.find(h => h.gesture !== G.NONE);
+        const targetShape = activeHand ? GESTURE_INFO[activeHand.gesture].shape : 'sphere';
+
+        if (targetShape !== currentShape) {
+            // Set new target
+            targetPositions.set(shapes[targetShape]);
+            currentShape = targetShape;
+        }
+
+        // Smoothly morph basePositions toward targetPositions
+        for (let i = 0; i < N*3; i++) {
+            basePositions[i] += (targetPositions[i] - basePositions[i]) * MORPH_SPEED;
+        }
+    }
+
+    // =========================================================================
+    // I: Particle Physics (with hand interaction on top of morphing)
+    // =========================================================================
+    function applyHandForce(i3, px, py, pz, hp, gesture, ft) {
+        const dx=hp.x-px, dy=hp.y-py, dz=hp.z-pz;
+        const dSq = dx*dx+dy*dy+dz*dz;
+        if (dSq > INFLUENCE_RSQ) return;
+
+        const d = Math.sqrt(dSq)+0.001;
+        const nx=dx/d, ny=dy/d, nz=dz/d;
+        const inf = Math.min(1, 250/(dSq+1));
+
+        // All gestures apply a gentle attract/repel on top of morphing
+        // This lets you "sculpt" the mathematical shapes
+        const attract = 0.12 * inf;
+        velocities[i3]   += nx*attract;
+        velocities[i3+1] += ny*attract;
+        velocities[i3+2] += nz*attract;
+    }
+
+    function updateParticles() {
+        const anyActive = handStates.some(h => h.gesture !== G.NONE);
+
+        for (let i = 0; i < N; i++) {
+            const i3 = i*3;
+            const px=positions[i3], py=positions[i3+1], pz=positions[i3+2];
+
+            // Hand interaction: gentle pull toward hand (sculpting)
+            for (let h=0; h<2; h++) {
+                if (handStates[h].gesture !== G.NONE) {
+                    applyHandForce(i3, px, py, pz, handStates[h].pos, handStates[h].gesture, handStates[h].fingerTip);
+                }
+            }
+
+            // Spring return to morphing base positions
+            const rs = anyActive ? RETURN_FORCE : RETURN_FORCE * 3;
+            velocities[i3]   += (basePositions[i3]-px)*rs;
+            velocities[i3+1] += (basePositions[i3+1]-py)*rs;
+            velocities[i3+2] += (basePositions[i3+2]-pz)*rs;
+
+            velocities[i3]*=DAMPING; velocities[i3+1]*=DAMPING; velocities[i3+2]*=DAMPING;
+
+            const vx=velocities[i3], vy=velocities[i3+1], vz=velocities[i3+2];
+            const vl = Math.sqrt(vx*vx+vy*vy+vz*vz);
+            if (vl > MAX_VELOCITY) {
+                const s=MAX_VELOCITY/vl;
+                velocities[i3]*=s; velocities[i3+1]*=s; velocities[i3+2]*=s;
+            }
+
+            positions[i3]+=velocities[i3]; positions[i3+1]+=velocities[i3+1]; positions[i3+2]+=velocities[i3+2];
+        }
+        geometry.attributes.position.needsUpdate = true;
+    }
+
+    function updateColors() {
+        const time = performance.now()*0.001;
+        const activeHand = handStates.find(h => h.gesture !== G.NONE);
+        let baseHue = 0.53 + Math.sin(time*0.3)*0.02;
+        let sat=0.6, light=0.55;
+
+        if (activeHand) {
+            baseHue = GESTURE_INFO[activeHand.gesture].hue + Math.sin(time*0.5)*0.015;
+            sat=0.7; light=0.6;
+        }
+
+        for (let i=0; i<N; i++) {
+            const i3=i*3;
+            const hue = (baseHue + (i/N)*0.08) % 1.0;
+            tmpColor.setHSL(hue, sat, light);
+            colors[i3]   += (tmpColor.r-colors[i3])*0.04;
+            colors[i3+1] += (tmpColor.g-colors[i3+1])*0.04;
+            colors[i3+2] += (tmpColor.b-colors[i3+2])*0.04;
+        }
+        geometry.attributes.color.needsUpdate = true;
+    }
+
+    function updateSizes() {
+        const anyActive = handStates.some(h => h.gesture !== G.NONE);
+        for (let i=0; i<N; i++) {
+            let target = baseSizes[i];
+            if (anyActive) {
+                const i3=i*3;
+                const speed = Math.sqrt(velocities[i3]**2+velocities[i3+1]**2+velocities[i3+2]**2);
+                target = baseSizes[i] + speed*1.2;
+            }
+            sizes[i] += (target-sizes[i])*0.1;
+        }
+        geometry.attributes.size.needsUpdate = true;
+    }
+
+    // =========================================================================
+    // J: Holographic wireframe animations
+    // =========================================================================
+    function updateHolographics(time) {
+        icoMesh.rotation.x = time*0.15;
+        icoMesh.rotation.y = time*0.2;
+        ring1.rotation.z = time*0.1;
+        ring2.rotation.y = time*0.08;
+        ring2.rotation.x = Math.PI/3 + Math.sin(time*0.2)*0.1;
+
+        const anyActive = handStates.some(h => h.gesture !== G.NONE);
+        icoMat.opacity += ((anyActive ? 0.12 : 0.06) - icoMat.opacity)*0.05;
+        ringMat.opacity += ((anyActive ? 0.18 : 0.1) - ringMat.opacity)*0.05;
+    }
+
+    // =========================================================================
+    // K: Webcam Overlay
+    // =========================================================================
+    const overlayCanvas = document.getElementById('webcam-overlay');
+    overlayCanvas.width = 240; overlayCanvas.height = 180;
+    const ctx = overlayCanvas.getContext('2d');
+
+    function drawWebcamOverlay(allLandmarks) {
+        ctx.clearRect(0,0,240,180);
+        if (video) {
+            ctx.save(); ctx.globalAlpha=0.6; ctx.scale(-1,1);
+            ctx.drawImage(video,-240,0,240,180);
+            ctx.restore();
+            ctx.fillStyle='rgba(10,40,50,0.3)';
+            ctx.fillRect(0,0,240,180);
+        }
+        for (let h=0; h<allLandmarks.length; h++) {
+            const lm=allLandmarks[h];
+            const color = h===0 ? '#4af0ff' : '#1a6bff';
+            ctx.strokeStyle=color; ctx.lineWidth=1; ctx.globalAlpha=0.6;
+            for (const [a,b] of HAND_CONNECTIONS) {
+                ctx.beginPath();
+                ctx.moveTo((1-lm[a].x)*240, lm[a].y*180);
+                ctx.lineTo((1-lm[b].x)*240, lm[b].y*180);
+                ctx.stroke();
+            }
+            ctx.globalAlpha=1; ctx.fillStyle=color;
+            for (const pt of lm) {
+                ctx.beginPath();
+                ctx.arc((1-pt.x)*240, pt.y*180, 2, 0, Math.PI*2);
+                ctx.fill();
+            }
+        }
+        ctx.globalAlpha=1;
+        // Scanline
+        ctx.strokeStyle='rgba(74,240,255,0.04)'; ctx.lineWidth=1;
+        const sy = (performance.now()*0.05)%180;
+        ctx.beginPath(); ctx.moveTo(0,sy); ctx.lineTo(240,sy); ctx.stroke();
+    }
+
+    // =========================================================================
+    // L: UI Updates
+    // =========================================================================
+    let lastGestureKey = '';
+    let lastShapeLabel = '';
+
+    function updateUI() {
+        // Gesture tags
+        let key='';
+        for (let h=0;h<2;h++) key+=handStates[h].gesture;
+        if (key !== lastGestureKey) {
+            lastGestureKey = key;
+            while (gestureLabelsEl.firstChild) gestureLabelsEl.removeChild(gestureLabelsEl.firstChild);
+            for (let h=0;h<2;h++) {
+                const hs=handStates[h];
+                if (hs.gesture !== G.NONE) {
+                    const tag = document.createElement('div');
+                    tag.className = 'gesture-tag';
+                    tag.textContent = (h===0?'L':'R') + ' // ' + GESTURE_INFO[hs.gesture].label;
+                    gestureLabelsEl.appendChild(tag);
+                }
+            }
+        }
+
+        // Shape label
+        const activeHand = handStates.find(h => h.gesture !== G.NONE);
+        const shapeLabel = activeHand ? GESTURE_INFO[activeHand.gesture].label : '';
+        if (shapeLabel !== lastShapeLabel) {
+            lastShapeLabel = shapeLabel;
+            shapeLabelEl.textContent = shapeLabel;
+            shapeLabelEl.style.opacity = shapeLabel ? '0.8' : '0';
+        }
+    }
+
+    // =========================================================================
+    // M: Animation Loop
+    // =========================================================================
+    let frameCount=0, lastFpsTime=performance.now();
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const time = performance.now()*0.001;
+
+        const allLandmarks = detectHands();
+        updateHandStates(allLandmarks);
+        updateShapeMorphing();
+        updateParticles();
+        updateColors();
+        updateSizes();
+        updateHolographics(time);
+
+        scene.rotation.y += 0.0006;
+        renderer.render(scene, camera);
+
+        drawWebcamOverlay(allLandmarks);
+        updateUI();
+
+        frameCount++;
+        const now=performance.now();
+        if (now-lastFpsTime > 1000) {
+            hudFps.textContent = 'FPS: '+frameCount;
+            frameCount=0; lastFpsTime=now;
+        }
+    }
+
+    // =========================================================================
+    // N: Bootstrap
+    // =========================================================================
+    async function init() {
+        statusEl.textContent = 'INITIALIZING HOLOGRAPHIC INTERFACE...';
+        try {
+            await initHandTracking();
+            statusEl.textContent = 'SYSTEM ONLINE // SHOW YOUR HANDS';
+            setTimeout(() => { statusEl.style.opacity='0'; }, 3000);
+        } catch(err) {
+            console.error('Hand tracking error:', err);
+            statusEl.textContent = 'ERROR: ' + err.message;
+        }
+        animate();
+    }
+
+    init();
+    </script>
+</body>
+</html>
